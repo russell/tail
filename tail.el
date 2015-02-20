@@ -38,138 +38,62 @@
 
 ;;  Custom variables (may be set by the user)
 
-(defgroup tail nil
-  "Tail files or commands into Emacs buffers."
-  :prefix "tail-"
-  :group 'environment)
-
-(defcustom tail-volatile t
-  "Use non-nil to erase previous output"
-  :options '(nil t)
-  :group 'tail)
-
-(defcustom tail-audible nil
-  "Use non-nil to produce a bell when some output is displayed"
-  :options '(nil t)
-  :group 'tail)
-
-(defcustom tail-raise nil
-  "Use non-nil to raise current frame when some output is displayed (could be *very* annoying)"
-  :options '(nil t)
-  :group 'tail)
-
-(defcustom tail-hide-delay 5
-  "Time in seconds before a tail window is deleted"
-  :type 'integer
-  :group 'tail)
-
-(defcustom tail-max-size 5
-  "Maximum size of the window"
-  :type 'integer
-  :group 'tail)
-
-
 ;; Functions
 
-;; Taken from calendar/appt.el
 (defun tail-disp-window (tail-buffer tail-msg)
   "Display some content specified by ``tail-msg'' inside buffer
 ``tail-msg''.  Create this buffer if necessary and put it inside a
 newly created window on the lowest side of the frame."
-
-  (require 'electric)
-
-  ;; Make sure we're not in the minibuffer
-  ;; before splitting the window.
-
-  (if (equal (selected-window) (minibuffer-window))
-      (if (other-window 1)
-	  (select-window (other-window 1))
-	(if (and window-system (other-frame 1))
-	    (select-frame (other-frame 1)))))
-
-  (let* ((this-buffer (current-buffer))
-	 (this-window (selected-window))
-	 (tail-disp-buf (set-buffer (get-buffer-create tail-buffer))))
-
-    (if (cdr (assq 'unsplittable (frame-parameters)))
-	;; In an unsplittable frame, use something somewhere else.
-	(display-buffer tail-disp-buf)
-      (unless (or (special-display-p (buffer-name tail-disp-buf))
-		  (same-window-p (buffer-name tail-disp-buf))
-		  (get-buffer-window tail-buffer))
-	;; By default, split the bottom window and use the lower part.
-	(tail-select-lowest-window)
-	(split-window))
-      (pop-to-buffer tail-disp-buf))
-
-    (toggle-read-only 0)
-    (if tail-volatile
-	(erase-buffer))
-    (insert-string tail-msg)
-    (toggle-read-only 1)
-    (shrink-window-if-larger-than-buffer (get-buffer-window tail-disp-buf t))
-    (if (> (window-height (get-buffer-window tail-disp-buf t)) tail-max-size)
-	(shrink-window (- (window-height (get-buffer-window tail-disp-buf t)) tail-max-size)))
-    (set-buffer-modified-p nil)
-    (if tail-raise
-	(raise-frame (selected-frame)))
-    (select-window this-window)
-    (if tail-audible
-	(beep 1))
-    (if tail-hide-delay
-	(run-with-timer tail-hide-delay nil 'tail-hide-window tail-buffer))))
-
-
-(defun tail-hide-window (buffer)
-  (delete-window (get-buffer-window buffer t)))	; TODO: cancel timer when some output comes during that time
-
-
-(defun tail-select-lowest-window ()
-  "Select the lowest window on the frame."
-  (let* ((lowest-window (selected-window))
-	 (bottom-edge (car (cdr (cdr (cdr (window-edges))))))
-         (last-window (previous-window))
-         (window-search t))
-    (while window-search
-      (let* ((this-window (next-window))
-	     (next-bottom-edge (car (cdr (cdr (cdr
-					       (window-edges this-window)))))))
-	(if (< bottom-edge next-bottom-edge)
-	    (progn
-	      (setq bottom-edge next-bottom-edge)
-	      (setq lowest-window this-window)))
-
-	(select-window this-window)
-	(if (eq last-window this-window)
-	    (progn
-	      (select-window lowest-window)
-	      (setq window-search nil)))))))
+  (with-current-buffer tail-buffer
+      (let ((goto-eof (eq (point) (point-max))))
+        (let ((buffer-read-only nil))
+          (save-excursion
+            (goto-char (point-max))
+            (insert tail-msg)))
+        (set-buffer-modified-p nil)
+        (when goto-eof
+          (if (get-buffer-window tail-buffer t)
+              (with-selected-window (get-buffer-window tail-buffer t)
+                (goto-char (point-max))
+                (let ((this-scroll-margin
+                        (min (max 0 scroll-margin)
+                             (truncate (/ (window-body-height) 4.0)))))
+                  (recenter (- -1 this-scroll-margin))))
+            (goto-char (point-max)))))))
 
 
 (defun tail-file (file)
   "Tails file specified with argument ``file'' inside a new buffer.
-``file'' *cannot* be a remote file specified with ange-ftp syntaxm
+``file'' *cannot* be a remote file specified with ange-ftp syntax
 because it is passed to the Unix tail command."
   (interactive "Ftail file: ")
-  (tail-command "tail" "-F" file)) ; TODO: what if file is remote (i.e. via ange-ftp)
+  (tail-command "tail" file "-F"))
 
 
-(defun tail-command (command &rest args)
-  "Tails command specified with argument ``command'', with arguments
-``args'' inside a new buffer.  It is also called by tail-file"
+(defun tail-command (command filename &rest args)
+  "Tails command specified with argument ``command'', with
+arguments ``args'' inside a new buffer."
   (interactive "sTail command: \neToto: ")
-  (let ((process
-	 (apply 'start-process-shell-command
-		command
-		(concat "*Tail: "
-			command
-			(if args " " "")
-			(mapconcat 'identity args " ")
-			"*")
-		command
-		args)))
-    (set-process-filter process 'tail-filter)))
+  (let* ((buffer-name (mapconcat 'identity
+                                 (concatenate
+                                 'list (list "*Tail:" command)
+                                 args (list filename "*"))
+                                 " "))
+         (filename (if (file-remote-p filename)
+                       (file-remote-p filename 'localname)
+                     filename))
+         (buffer (get-buffer-create buffer-name))
+         (process
+          (start-file-process-shell-command
+           command
+           buffer-name
+           (mapconcat 'identity
+                      (concatenate 'list (list command) args (list filename))
+                      " "))))
+    (with-current-buffer buffer-name
+      (syslog-mode))
+    (set-process-filter process 'tail-filter)
+    (switch-to-buffer-other-window buffer-name)))
 
 
 (defun tail-filter (process line)
